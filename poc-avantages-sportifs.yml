@@ -1,0 +1,101 @@
+id: poc_avantages_sportifs
+namespace: sport_data_solution
+description: Pipeline ETL pour le calcul des avantages sportifs et l'impact financier.
+
+inputs:
+  - id: donnees_rh_file
+    type: FILE
+  - id: activites_simulees_file
+    type: FILE
+
+# 1. Variables : Paramètres modifiables
+variables:
+  prime_rate: 0.05
+  min_activites: 15
+  cout_journalier_moyen: 250 
+
+# 2. Déclencheur : Planification mensuelle
+triggers:
+  - id: mensuel
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 9 15 * *" 
+
+# 3. Tâches principales
+tasks:
+  
+  # ÉTAPE A : BRONZE (Ingestion et Préparation de la BDD)
+  - id: etape_a_ingestion_bronze
+    type: io.kestra.plugin.core.flow.Parallel
+    tasks:
+      
+      # Chargement des données RH brutes
+      - id: load_rh
+        type: io.kestra.plugin.jdbc.postgresql.Query
+        description: Chargement des données RH brutes via commande COPY (DELIMITER ;).
+        url: "jdbc:postgresql://postgres:5432/sport_data" 
+        username: "postgres" 
+        password: "Yaounde0123@"
+        sql: |
+          COPY rh_brut FROM '{{ inputs.donnees_rh_file }}' (FORMAT CSV, DELIMITER ';', HEADER TRUE);
+        
+      # Chargement des activités sportives
+      - id: load_activites
+        type: io.kestra.plugin.jdbc.postgresql.Query
+        description: Chargement des 12 mois d'historique Strava simulé via commande COPY (DELIMITER ,).
+        url: "jdbc:postgresql://postgres:5432/sport_data" 
+        username: "postgres"
+        password: "Yaounde0123@"
+        sql: |
+          COPY activites_brutes FROM '{{ inputs.activites_simulees_file }}' (FORMAT CSV, DELIMITER ',', HEADER TRUE);
+          
+  # ÉTAPE B : SILVER & GOLD (Transformation)
+  - id: etape_b_transformation_sql
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    description: Exécution des transformations SQL pour créer les tables Silver et Gold.
+    url: "jdbc:postgresql://postgres:5432/sport_data" 
+    username: "postgres"
+    password: "Yaounde0123@"
+    sql: |
+      -- Exécution de SQL de transformation
+      CREATE TABLE IF NOT EXISTS reporting_gold AS 
+      SELECT * FROM activites_brutes LIMIT 10;
+      
+  # ÉTAPE C : ACTIONS (Slack et Reporting)
+  - id: etape_c_actions
+    type: io.kestra.plugin.core.flow.Parallel
+    tasks:
+      
+      # Tâche 1: Récupération de la donnée (Query simple)
+      - id: post_dernier_evenement_slack_query
+        type: io.kestra.plugin.jdbc.postgresql.Query
+        description: Récupère la dernière activité.
+        url: "jdbc:postgresql://postgres:5432/sport_data" 
+        username: "postgres" 
+        password: "Yaounde0123@"
+        sql: |
+          SELECT 
+            "ID salarié", 
+            "Type d\'activité", 
+            "Distance (km)"
+          FROM activites_brutes
+          ORDER BY "Date" DESC, "ID activité" DESC
+          LIMIT 1;
+
+      # Tâche 2: Notification Slack (Dépendance implicite, syntaxe ultra-simple)
+      - id: send_slack_notification
+        type: io.kestra.plugin.notifications.slack.SlackExecution
+        url: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX" 
+        payload: |
+          {
+            "text": "Félicitations à l'employé {{ outputs.post_dernier_evenement_slack_query.rows[0]['ID salarié'] }} pour sa dernière activité de type *{{ outputs.post_dernier_evenement_slack_query.rows[0]['Type d\'activité'] }}* ({{ outputs.post_dernier_evenement_slack_query.rows[0]['Distance (km)'] }} km) ! 🏃‍♀️"
+          }
+
+      # Tâche 3: Export du rapport final (Query avec fetchType: STORE)
+      - id: export_rapport_final
+        type: io.kestra.plugin.jdbc.postgresql.Query 
+        description: Récupère la table finale 'reporting_gold' pour l'export Power BI.
+        url: "jdbc:postgresql://postgres:5432/sport_data" 
+        username: "postgres" 
+        password: "Yaounde0123@"
+        sql: SELECT * FROM reporting_gold; 
+        fetchType: STORE
